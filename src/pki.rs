@@ -1,6 +1,10 @@
 use crate::TlsError;
 use crate::config::{Certificate, TlsCipherSuite, TlsClock, TlsVerifier};
-use crate::der_certificate::{DecodedCertificate, ECDSA_SHA256, ECDSA_SHA384, ED25519, Time};
+#[cfg(feature = "p384")]
+use crate::der_certificate::ECDSA_SHA384;
+#[cfg(feature = "ed25519")]
+use crate::der_certificate::ED25519;
+use crate::der_certificate::{DecodedCertificate, ECDSA_SHA256, Time};
 #[cfg(feature = "rsa")]
 use crate::der_certificate::{RSA_PKCS1_SHA256, RSA_PKCS1_SHA384, RSA_PKCS1_SHA512};
 use crate::extensions::extension_data::signature_algorithms::SignatureScheme;
@@ -54,35 +58,27 @@ impl<'a> Iterator for CertificateChain<'a> {
     }
 }
 
-pub struct CertVerifier<CipherSuite, Clock, const CERT_SIZE: usize>
+pub struct CertVerifier<'a, CipherSuite, Clock, const CERT_SIZE: usize>
 where
     Clock: TlsClock,
     CipherSuite: TlsCipherSuite,
 {
+    ca: Certificate<&'a [u8]>,
     host: Option<heapless::String<64>>,
     certificate_transcript: Option<CipherSuite::Hash>,
     certificate: Option<OwnedCertificate<CERT_SIZE>>,
     _clock: PhantomData<Clock>,
 }
 
-impl<Cs, C, const CERT_SIZE: usize> Default for CertVerifier<Cs, C, CERT_SIZE>
-where
-    C: TlsClock,
-    Cs: TlsCipherSuite,
-{
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<CipherSuite, Clock, const CERT_SIZE: usize> CertVerifier<CipherSuite, Clock, CERT_SIZE>
+impl<'a, CipherSuite, Clock, const CERT_SIZE: usize> CertVerifier<'a, CipherSuite, Clock, CERT_SIZE>
 where
     Clock: TlsClock,
     CipherSuite: TlsCipherSuite,
 {
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(ca: Certificate<&'a [u8]>) -> Self {
         Self {
+            ca,
             host: None,
             certificate_transcript: None,
             certificate: None,
@@ -92,7 +88,7 @@ where
 }
 
 impl<CipherSuite, Clock, const CERT_SIZE: usize> TlsVerifier<CipherSuite>
-    for CertVerifier<CipherSuite, Clock, CERT_SIZE>
+    for CertVerifier<'_, CipherSuite, Clock, CERT_SIZE>
 where
     CipherSuite: TlsCipherSuite,
     Clock: TlsClock,
@@ -107,18 +103,10 @@ where
     fn verify_certificate(
         &mut self,
         transcript: &CipherSuite::Hash,
-        ca: &Option<Certificate>,
         cert: ServerCertificate,
     ) -> Result<(), TlsError> {
-        let ca = if let Some(ca) = ca {
-            ca
-        } else {
-            error!("Verifying a certificate chain without ca is not implemented");
-            return Err(TlsError::Unimplemented);
-        };
-
         let mut cn = None;
-        for (p, q) in CertificateChain::new(&ca.into(), &cert) {
+        for (p, q) in CertificateChain::new(&(&self.ca).into(), &cert) {
             cn = verify_certificate(p, q, Clock::now())?;
         }
         if self.host.ne(&cn) {
@@ -183,6 +171,7 @@ fn verify_signature(
                 Signature::from_der(&verify.signature).map_err(|_| TlsError::DecodeError)?;
             verified = verifying_key.verify(message, &signature).is_ok();
         }
+        #[cfg(feature = "p384")]
         SignatureScheme::EcdsaSecp384r1Sha384 => {
             use p384::ecdsa::{Signature, VerifyingKey, signature::Verifier};
             let verifying_key =
@@ -191,6 +180,7 @@ fn verify_signature(
                 Signature::from_der(&verify.signature).map_err(|_| TlsError::DecodeError)?;
             verified = verifying_key.verify(message, &signature).is_ok();
         }
+        #[cfg(feature = "ed25519")]
         SignatureScheme::Ed25519 => {
             use ed25519_dalek::{Signature, Verifier, VerifyingKey};
             let verifying_key: VerifyingKey =
@@ -254,7 +244,10 @@ fn verify_signature(
             verified = verifying_key.verify(message, &signature).is_ok();
         }
         _ => {
-            error!("InvalidSignatureScheme: {:?}", verify.signature_scheme);
+            error!(
+                "InvalidSignatureScheme: {:?} Are you missing a feature?",
+                verify.signature_scheme
+            );
             return Err(TlsError::InvalidSignatureScheme);
         }
     }
@@ -352,6 +345,7 @@ fn verify_certificate(
 
                 verified = verifying_key.verify(&certificate_data, &signature).is_ok();
             }
+            #[cfg(feature = "p384")]
             ECDSA_SHA384 => {
                 use p384::ecdsa::{Signature, VerifyingKey, signature::Verifier};
                 let verifying_key = VerifyingKey::from_sec1_bytes(ca_public_key)
@@ -367,6 +361,7 @@ fn verify_certificate(
 
                 verified = verifying_key.verify(&certificate_data, &signature).is_ok();
             }
+            #[cfg(feature = "ed25519")]
             ED25519 => {
                 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
                 let verifying_key: VerifyingKey =
